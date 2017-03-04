@@ -64,7 +64,7 @@ type Insured struct {
 	LastName           	   string `json:"lastName"`
 	PhoneNo         	   string `json:"phoneNo"`
 	Email           	   string `json:"email"`
-	Dob             	   string `json:"dobb"`
+	Dob             	   string `json:"dob"`
 	DrivingLicense         string `json:"DrivingLicense"`
 }
 
@@ -84,6 +84,7 @@ type Claim struct {
 	PolicyNo			string		`json:"policyNo"` 
 	ClaimNo	    		string		`json:"claimNo"`
 	EstmLossAmount		string		`json:"estmLossAmount"` 
+	Status              string      `json:"status"`
 	LossDetails 		Loss 		`json:"lossDetails"`
 	InsuredDetails 		Insured 	`json:"insuredDetails"`
 	VehicleDetails 		Vehicle 	`json:"vehicleDetails"`
@@ -106,40 +107,121 @@ func main() {
 
 // Init resets all the things
 func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
-	if len(args) != 1 {
-		return nil, errors.New("Incorrect number of arguments. Expecting 1")
-	}
 	
-	var claim Claim
+	fmt.Println("Initialization Complete ")
 	
-	bytes, err := json.Marshal(claim)
-	
-	if err != nil { return nil, errors.New("Error creating V5C_Holder record") }
-
-	err = stub.PutState("claimNo", bytes)
-	
-	if err != nil {
-		return nil, err
-	}
 	return nil, nil
 }
 
+func getClaimApplication(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
+	logger.Debug("Entering GetLoanApplication")
+
+	if len(args) < 1 {
+		logger.Error("Invalid number of arguments")
+		return nil, errors.New("Missing Claim No")
+	}
+
+	var claimNo = args[0]
+	bytes, err := stub.GetState(claimNo)
+	if err != nil {
+		logger.Error("Could not fetch Claim application with No "+claimNo+" from ledger", err)
+		return nil, err
+	}
+	return bytes, nil
+}
+
+func createClaimApplication(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
+	logger.Debug("Entering CreateLoanApplication")
+
+	if len(args) < 2 {
+		logger.Error("Invalid number of args")
+		return nil, errors.New("Expected atleast two arguments for Claim application creation")
+	}
+
+	var claimNo = args[0]
+	var claimApplicationInput = args[1]
+
+	err := stub.PutState(claimNo, []byte(claimApplicationInput))
+	if err != nil {
+		logger.Error("Could not save claim  to ledger", err)
+		return nil, err
+	}
+
+	var customEvent = "{eventType: 'claimApplicationCreation', description:" + claimNo + "' Successfully created'}"
+	err = stub.SetEvent("evtSender", []byte(customEvent))
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("Successfully saved claim application")
+	return nil, nil
+
+}
+
+
+func updateClaimApplication(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
+	logger.Debug("Entering UpdateLoanApplication")
+
+	if len(args) < 2 {
+		logger.Error("Invalid number of args")
+		return nil, errors.New("Expected atleast two arguments for claim application update")
+	}
+
+	var claimNo = args[0]
+	var status = args[1]
+
+	laBytes, err := stub.GetState(claimNo)
+	if err != nil {
+		logger.Error("Could not fetch claim application from ledger", err)
+		return nil, err
+	}
+	var claimApplication Claim
+	err = json.Unmarshal(laBytes, &claimApplication)
+	claimApplication.Status = status
+
+	laBytes, err = json.Marshal(&claimApplication)
+	if err != nil {
+		logger.Error("Could not marshal claim application post update", err)
+		return nil, err
+	}
+
+	err = stub.PutState(claimNo, laBytes)
+	if err != nil {
+		logger.Error("Could not save claim application post update", err)
+		return nil, err
+	}
+
+	var customEvent = "{eventType: 'claimApplicationUpdate', description:" + claimNo + "' Successfully updated status'}"
+	err = stub.SetEvent("evtSender", []byte(customEvent))
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("Successfully updated claim application")
+	return nil, nil
+
+}
+
+
+
 // Invoke is our entry point to invoke a chaincode function
 func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
-	fmt.Println("invoke is running " + function)
-
-	var c Claim
-
-	// Handle different functions
-	if function == "init" {													//initialize the chaincode state, used as reset
-		return t.Init(stub, "init", args)
-	} else if function == "add_fnol" {
-        return t.add_fnol(stub, c)
-   	} else {
-		
+	
+	if function == "createClaimApplication" {
+		username, _ := GetCertAttribute(stub, "username")
+		role, _ := GetCertAttribute(stub, "role")
+		if role == "Claim_CSR" {
+			return createClaimApplication(stub, args)
+		} else {
+			return nil, errors.New(username + " with role " + role + " does not have access to create a claim application")
+		}
+	}else if function == "updateClaimApplication" {
+			username, _ := GetCertAttribute(stub, "username")
+			role, _ := GetCertAttribute(stub, "role")
+			if role == "Claim_UPDATE" {
+				return updateClaimApplication(stub, args)
+			} else {
+				return nil, errors.New(username + " with role " + role + " does not have access to create a claim application")
+			}
 	}
-	fmt.Println("invoke did not find func: " + function)					//error
-
 	return nil, errors.New("Received unknown function invocation: " + function)
 }
 
@@ -147,16 +229,21 @@ func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface, function stri
 func (t *SimpleChaincode) Query(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
 	fmt.Println("query is running " + function)
 
-	 claimNo := args[1]
-	// Handle different functions
-	if function == "retrieve_Claim" { 
-		    c , err := t.retrieve_Claim(stub, claimNo) 
-			bytes, err := json.Marshal(c)                         //read a variable
-	        return bytes , err
-    	}
-	fmt.Println("query did not find func: " + function)						//error
+	if function == "getClaimApplication" {
+		return getClaimApplication(stub, args)
+	}
 
-	return nil, errors.New("Received unknown function query: " + function)
+	return nil, nil
+}
+
+func GetCertAttribute(stub shim.ChaincodeStubInterface, attributeName string) (string, error) {
+	logger.Debug("Entering GetCertAttribute")
+	attr, err := stub.ReadCertAttribute(attributeName)
+	if err != nil {
+		return "", errors.New("Couldn't get attribute " + attributeName + ". Error: " + err.Error())
+	}
+	attrString := string(attr)
+	return attrString, nil
 }
 
 func (t *SimpleChaincode) add_fnol(stub shim.ChaincodeStubInterface, claimObj Claim) ([]byte, error) {
@@ -172,23 +259,12 @@ func (t *SimpleChaincode) add_fnol(stub shim.ChaincodeStubInterface, claimObj Cl
     return nil, nil
 }
 
-func (t *SimpleChaincode) read(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
-    var key, jsonResp string
-    var err error
 
-    if len(args) != 1 {
-        return nil, errors.New("Incorrect number of arguments. Expecting name of the key to query")
-    }
-
-    key = args[0]
-    valAsbytes, err := stub.GetState(key)
-    if err != nil {
-        jsonResp = "{\"Error\":\"Failed to get state for " + key + "\"}"
-        return nil, errors.New(jsonResp)
-    }
-
-    return valAsbytes, nil
+type customEvent struct {
+	Type       string `json:"type"`
+	Decription string `json:"description"`
 }
+
 
 //==============================================================================================================================
 // save_changes - Writes to the ledger the Vehicle struct passed in a JSON format. Uses the shim file's
